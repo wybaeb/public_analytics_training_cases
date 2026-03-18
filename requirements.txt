@@ -1,0 +1,6 @@
+pandas>=2.2
+matplotlib>=3.8
+scikit-learn>=1.5
+jupyterlab>=4.0
+notebook>=7.0
+ipykernel>=6.29

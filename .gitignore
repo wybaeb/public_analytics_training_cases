@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+bi_metabase_contact_center/artifacts/metabase_runtime.json
+bi_metabase_contact_center/artifacts/metabase_dashboard_actual.png
+bi_metabase_contact_center/artifacts/bi_setup_steps.png
+excel_legal_ai/artifacts/data_category_map_legal_ai.svg
+excel_legal_ai/artifacts/excel_case_intro.svg
+excel_legal_ai/artifacts/excel_import_flow.svg
