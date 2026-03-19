@@ -8,3 +8,5 @@ bi_metabase_contact_center/artifacts/bi_setup_steps.png
 excel_legal_ai/artifacts/data_category_map_legal_ai.svg
 excel_legal_ai/artifacts/excel_case_intro.svg
 excel_legal_ai/artifacts/excel_import_flow.svg
+bi_metabase_contact_center/artifacts/*.png
+bi_metabase_contact_center/artifacts/bi_dashboard_target.svg

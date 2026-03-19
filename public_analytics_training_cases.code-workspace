@@ -7,6 +7,8 @@
   "settings": {
     "git.openRepositoryInParentFolders": "never",
     "git.autoRepositoryDetection": "subFolders",
-    "jupyter.notebookFileRoot": "${workspaceFolder}"
+    "jupyter.notebookFileRoot": "${workspaceFolder}",
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.terminal.activateEnvironment": true
   }
 }

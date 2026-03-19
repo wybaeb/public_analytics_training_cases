@@ -80,25 +80,81 @@ ORDER BY "Выручка, руб." DESC
         "sizeY": 5,
     },
     {
-        "name": "Следование рекомендациям и продажи",
-        "display": "scatter",
-        "description": "Сотрудники, которые лучше соблюдают рекомендации, обычно показывают более сильные продажи.",
+        "name": "Эффект обучения на выручку",
+        "display": "line",
+        "description": "По неделям видно, как вместе растут применение рекомендаций в работе и выручка команды.",
         "query": """
+WITH weekly AS (
+  SELECT
+    week_start,
+    AVG(adherence_score) * 100 AS adherence_pct,
+    AVG(sales_revenue_rub) AS revenue_rub
+  FROM contact_center_training
+  GROUP BY 1
+),
+baseline AS (
+  SELECT
+    MIN(week_start) AS first_week
+  FROM weekly
+),
+base_values AS (
+  SELECT
+    w.adherence_pct AS base_adherence_pct,
+    w.revenue_rub AS base_revenue_rub
+  FROM weekly w
+  CROSS JOIN baseline b
+  WHERE w.week_start = b.first_week
+)
 SELECT
-  employee_name AS "Сотрудник",
-  ROUND(AVG(adherence_score) * 100, 1) AS "Следование рекомендациям, %",
-  ROUND(AVG(sales_revenue_rub), 0) AS "Средняя выручка, руб.",
-  ROUND(AVG(recommendation_uptake) * 100, 1) AS "Выполнение рекомендаций, %"
-FROM contact_center_training
-GROUP BY 1
-ORDER BY "Средняя выручка, руб." DESC
+  w.week_start,
+  ROUND(w.adherence_pct, 1) AS "Следование рекомендациям, %",
+  ROUND(w.revenue_rub, 0) AS "Средняя выручка, руб.",
+  ROUND(w.adherence_pct / NULLIF(b.base_adherence_pct, 0) * 100, 1) AS "Индекс следования, неделя 1 = 100",
+  ROUND(w.revenue_rub / NULLIF(b.base_revenue_rub, 0) * 100, 1) AS "Индекс выручки, неделя 1 = 100"
+FROM weekly w
+CROSS JOIN base_values b
+ORDER BY 1
 """.strip(),
         "row": 6,
         "col": 12,
         "sizeX": 12,
-        "sizeY": 5,
+        "sizeY": 4,
+    },
+    {
+        "name": "Корреляция следования и выручки",
+        "display": "scalar",
+        "description": "Коэффициент корреляции Пирсона между недельным уровнем следования рекомендациям и средней выручкой.",
+        "query": """
+WITH weekly AS (
+  SELECT
+    week_start,
+    AVG(adherence_score) AS adherence_score_avg,
+    AVG(sales_revenue_rub) AS revenue_rub_avg
+  FROM contact_center_training
+  GROUP BY 1
+)
+SELECT
+  ROUND(CORR(adherence_score_avg, revenue_rub_avg)::numeric, 3) AS "Коэффициент корреляции"
+FROM weekly
+""".strip(),
+        "row": 10,
+        "col": 12,
+        "sizeX": 12,
+        "sizeY": 1,
     },
 ]
+
+
+def database_details() -> dict:
+    return {
+        "host": "db",
+        "port": 5432,
+        "dbname": "bank_training",
+        "user": "bank_user",
+        "password": "bank_pass",
+        "ssl": False,
+        "tunnel-enabled": False,
+    }
 
 
 def api_request(path: str, method: str = "GET", payload: dict | None = None, session_id: str | None = None):
@@ -150,18 +206,14 @@ def maybe_run_initial_setup() -> None:
             "name": DB_NAME,
             "is_full_sync": True,
             "auto_run_queries": True,
-            "details": {
-                "host": "db",
-                "port": 5432,
-                "dbname": "bank_training",
-                "user": "bank_user",
-                "password": "bank_pass",
-                "ssl": False,
-                "tunnel-enabled": False,
-            },
+            "details": database_details(),
         },
     }
-    api_request("/api/setup", method="POST", payload=payload)
+    try:
+        api_request("/api/setup", method="POST", payload=payload)
+    except RuntimeError as exc:
+        if "The /api/setup route can only be used to create the first user" not in str(exc):
+            raise
     time.sleep(5)
 
 
@@ -180,7 +232,15 @@ def ensure_database_id(session_id: str) -> int:
     for db in items:
         if db.get("name") == DB_NAME:
             return db["id"]
-    raise RuntimeError(f"Database '{DB_NAME}' not found in Metabase.")
+    payload = {
+        "engine": "postgres",
+        "name": DB_NAME,
+        "is_full_sync": True,
+        "auto_run_queries": True,
+        "details": database_details(),
+    }
+    created = api_request("/api/database", method="POST", payload=payload, session_id=session_id)
+    return created["id"]
 
 
 def get_existing_collection_item(path: str, session_id: str, name: str):
@@ -201,6 +261,7 @@ def ensure_card(session_id: str, database_id: int, spec: dict) -> int:
         "name": spec["name"],
         "description": spec["description"],
         "display": spec["display"],
+        "visualization_settings": {},
         "dataset_query": {
             "database": database_id,
             "type": "native",
@@ -231,20 +292,60 @@ def ensure_dashboard(session_id: str) -> int:
 
 def attach_cards(session_id: str, dashboard_id: int, card_ids: list[int]) -> None:
     dashboard = api_request(f"/api/dashboard/{dashboard_id}", session_id=session_id)
-    existing_ids = {item.get("card", {}).get("id") for item in dashboard.get("ordered_cards", [])}
+    existing_cards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+    spec_by_card_id = {card_id: spec for spec, card_id in zip(CARD_SPECS, card_ids)}
+    dashcards = []
+    changed = False
+    next_temp_id = -1
+
+    for item in existing_cards:
+        current = dict(item)
+        current_card_id = current.get("card_id") or current.get("card", {}).get("id")
+        spec = spec_by_card_id.get(current_card_id)
+        if spec:
+            if (
+                current.get("row") != spec["row"]
+                or current.get("col") != spec["col"]
+                or current.get("size_x") != spec["sizeX"]
+                or current.get("size_y") != spec["sizeY"]
+            ):
+                current["row"] = spec["row"]
+                current["col"] = spec["col"]
+                current["size_x"] = spec["sizeX"]
+                current["size_y"] = spec["sizeY"]
+                changed = True
+        dashcards.append(current)
+
+    existing_ids = {
+        item.get("card_id") or item.get("card", {}).get("id")
+        for item in dashcards
+        if item.get("card_id") or item.get("card")
+    }
+
     for spec, card_id in zip(CARD_SPECS, card_ids):
         if card_id in existing_ids:
             continue
-        payload = {
-            "cardId": card_id,
-            "parameter_mappings": [],
-            "visualization_settings": {},
-            "sizeX": spec["sizeX"],
-            "sizeY": spec["sizeY"],
-            "row": spec["row"],
-            "col": spec["col"],
-        }
-        api_request(f"/api/dashboard/{dashboard_id}/cards", method="POST", payload=payload, session_id=session_id)
+        dashcards.append(
+            {
+                "id": next_temp_id,
+                "card_id": card_id,
+                "row": spec["row"],
+                "col": spec["col"],
+                "size_x": spec["sizeX"],
+                "size_y": spec["sizeY"],
+                "parameter_mappings": [],
+                "visualization_settings": {},
+            }
+        )
+        next_temp_id -= 1
+        changed = True
+    if changed:
+        api_request(
+            f"/api/dashboard/{dashboard_id}/cards",
+            method="PUT",
+            payload={"cards": dashcards},
+            session_id=session_id,
+        )
 
 
 def ensure_public_link(session_id: str, dashboard_id: int) -> str:
